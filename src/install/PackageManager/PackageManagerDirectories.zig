@@ -366,9 +366,20 @@ pub fn isFolderInCache(this: *PackageManager, folder_path: stringZ) bool {
 }
 
 pub fn setupGlobalDir(manager: *PackageManager, ctx: Command.Context) !void {
-    manager.options.global_bin_dir = try Options.openGlobalBinDir(ctx.install);
+    manager.options.global_bin_dir = Options.openGlobalBinDir(ctx.install) catch |err| {
+        Output.errGeneric("failed to open global bin directory: {s}", .{@errorName(err)});
+        if (bun.getenvZ("BUN_INSTALL") == null and bun.getenvZ("BUN_INSTALL_BIN") == null) {
+            Output.note("Try setting $BUN_INSTALL or $BUN_INSTALL_BIN environment variable", .{});
+        }
+        return err;
+    };
+
     var out_buffer: bun.PathBuffer = undefined;
-    const result = try bun.getFdPathZ(.fromStdDir(manager.options.global_bin_dir), &out_buffer);
+    const result = bun.getFdPathZ(.fromStdDir(manager.options.global_bin_dir), &out_buffer) catch |err| {
+        Output.errGeneric("failed to get path for global bin directory: {s}", .{@errorName(err)});
+        return err;
+    };
+
     const path = try FileSystem.instance.dirname_store.append([:0]u8, result);
     manager.options.bin_path = path.ptr[0..path.len :0];
 }
