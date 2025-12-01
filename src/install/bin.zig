@@ -560,7 +560,7 @@ pub const Bin = extern struct {
             _ = bun.sys.unlinkW(abs_exe_file);
         }
 
-        fn linkBinOrCreateShim(this: *Linker, abs_target: [:0]const u8, abs_dest: [:0]const u8, global: bool) void {
+        fn linkBinOrCreateShim(this: *Linker, abs_target: [:0]const u8, abs_dest: [:0]const u8) void {
             bun.assertWithLocation(std.fs.path.isAbsolute(abs_target), @src());
             bun.assertWithLocation(std.fs.path.isAbsolute(abs_dest), @src());
             bun.assertWithLocation(abs_target[abs_target.len - 1] != std.fs.path.sep, @src());
@@ -586,7 +586,7 @@ pub const Bin = extern struct {
             bun.analytics.Features.binlinks += 1;
 
             if (comptime !Environment.isWindows)
-                this.createSymlink(abs_target, abs_dest, global)
+                this.createSymlink(abs_target, abs_dest)
             else {
                 const target = bun.sys.openat(.cwd(), abs_target, bun.O.RDONLY, 0).unwrap() catch |err| {
                     if (err != error.EISDIR) {
@@ -596,7 +596,7 @@ pub const Bin = extern struct {
                     return;
                 };
                 defer target.close();
-                this.createWindowsShim(target, abs_target, abs_dest, global);
+                this.createWindowsShim(target, abs_target, abs_dest);
             }
 
             if (this.err != null) {
@@ -698,7 +698,7 @@ pub const Bin = extern struct {
             }
         }
 
-        fn createWindowsShim(this: *Linker, target: bun.FileDescriptor, abs_target: [:0]const u8, abs_dest: [:0]const u8, global: bool) void {
+        fn createWindowsShim(this: *Linker, target: bun.FileDescriptor, abs_target: [:0]const u8, abs_dest: [:0]const u8) void {
             const WinBinLinkingShim = @import("./windows-shim/BinLinkingShim.zig");
 
             var shim_buf: [65536]u8 = undefined;
@@ -712,16 +712,16 @@ pub const Bin = extern struct {
             const abs_bunx_file: [:0]const u16 = dest_buf[0 .. abs_dest_w.len + ".bunx".len :0];
 
             const bunx_file = bun.sys.File.openatOSPath(bun.invalid_fd, abs_bunx_file, bun.O.WRONLY | bun.O.CREAT | bun.O.TRUNC, 0o664).unwrap() catch |err| bunx_file: {
-                if (err != error.ENOENT or global) {
+                if (err != error.ENOENT) {
                     this.err = err;
                     return;
                 }
 
-                const node_modules_path_save = this.node_modules_path.save();
-                this.node_modules_path.append(".bin");
-                bun.makePath(std.fs.cwd(), this.node_modules_path.slice()) catch {};
-                node_modules_path_save.restore();
+                // Create directory for both global and non-global
+                const dest_dir = path.dirname(abs_dest, .auto);
+                bun.makePath(std.fs.cwd(), dest_dir) catch {};
 
+                // Retry opening the file
                 break :bunx_file bun.sys.File.openatOSPath(bun.invalid_fd, abs_bunx_file, bun.O.WRONLY | bun.O.CREAT | bun.O.TRUNC, 0o664).unwrap() catch |real_err| {
                     this.err = real_err;
                     return;
@@ -789,7 +789,7 @@ pub const Bin = extern struct {
             };
         }
 
-        fn createSymlink(this: *Linker, abs_target: [:0]const u8, abs_dest: [:0]const u8, global: bool) void {
+        fn createSymlink(this: *Linker, abs_target: [:0]const u8, abs_dest: [:0]const u8) void {
             defer {
                 if (this.err == null) {
                     _ = bun.sys.chmod(abs_target, umask | 0o777);
@@ -808,30 +808,19 @@ pub const Bin = extern struct {
                         return;
                     }
 
-                    // ENOENT means `.bin` hasn't been created yet. Should only happen if this isn't global
+                    // ENOENT means the directory hasn't been created yet
                     if (err.getErrno() == .NOENT) {
-                        if (global) {
-                            this.err = err.toZigErr();
-                            return;
-                        }
+                        // Create the directory (works for both global and non-global)
+                        bun.makePath(std.fs.cwd(), abs_dest_dir) catch {};
 
-                        const node_modules_path_save = this.node_modules_path.save();
-                        this.node_modules_path.append(".bin");
-                        bun.makePath(std.fs.cwd(), this.node_modules_path.slice()) catch {};
-                        node_modules_path_save.restore();
-
+                        // Retry the symlink creation
                         switch (bun.sys.symlinkRunningExecutable(rel_target, abs_dest)) {
                             .err => |real_error| {
-                                // It was just created, no need to delete destination and symlink again
                                 this.err = real_error.toZigErr();
                                 return;
                             },
                             .result => return,
                         }
-                        bun.sys.symlinkRunningExecutable(rel_target, abs_dest).unwrap() catch |real_err| {
-                            this.err = real_err;
-                        };
-                        return;
                     }
 
                     // beyond this error can only be `.EXIST`
@@ -911,7 +900,7 @@ pub const Bin = extern struct {
                     const abs_dest_len = @intFromPtr(abs_dest_buf_remain.ptr) - @intFromPtr(this.abs_dest_buf.ptr);
                     const abs_dest: [:0]const u8 = this.abs_dest_buf[0..abs_dest_len :0];
 
-                    this.linkBinOrCreateShim(abs_target, abs_dest, global);
+                    this.linkBinOrCreateShim(abs_target, abs_dest);
                 },
                 .named_file => {
                     const name = this.bin.value.named_file[0].slice(this.string_buf);
@@ -928,7 +917,7 @@ pub const Bin = extern struct {
                     const abs_dest_len = @intFromPtr(abs_dest_buf_remain.ptr) - @intFromPtr(this.abs_dest_buf.ptr);
                     const abs_dest: [:0]const u8 = this.abs_dest_buf[0..abs_dest_len :0];
 
-                    this.linkBinOrCreateShim(abs_target, abs_dest, global);
+                    this.linkBinOrCreateShim(abs_target, abs_dest);
                 },
                 .map => {
                     var i = this.bin.value.map.begin();
@@ -951,7 +940,7 @@ pub const Bin = extern struct {
                         const abs_dest_len = @intFromPtr(abs_dest_buf_remain.ptr) - @intFromPtr(this.abs_dest_buf.ptr);
                         const abs_dest: [:0]const u8 = this.abs_dest_buf[0..abs_dest_len :0];
 
-                        this.linkBinOrCreateShim(abs_target, abs_dest, global);
+                        this.linkBinOrCreateShim(abs_target, abs_dest);
                     }
                 },
                 .dir => {
@@ -988,7 +977,7 @@ pub const Bin = extern struct {
                                 const abs_dest_len = @intFromPtr(abs_dest_buf_remain.ptr) - @intFromPtr(this.abs_dest_buf.ptr);
                                 const abs_dest: [:0]const u8 = this.abs_dest_buf[0..abs_dest_len :0];
 
-                                this.linkBinOrCreateShim(abs_target, abs_dest, global);
+                                this.linkBinOrCreateShim(abs_target, abs_dest);
                             },
                             else => {},
                         }
